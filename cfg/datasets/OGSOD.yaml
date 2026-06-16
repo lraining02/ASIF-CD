@@ -1,0 +1,18 @@
+path: /home/liuruining/code/YOLOFUSE/ultralytics/cfg/datasets/OGSODyolo              # 数据集根目录
+train: images/train        # RGB 训练图
+val:   images/val        # RGB 验证图                 # (可选) RGB 测试图
+names:
+  0: bridge
+  1: harbor
+  2: oil_tank
+
+
+# LLVIP/
+# ├── images/
+# │   ├── train/xxx.jpg
+# │   ├── val/xxx.jpg
+# │   └── test/xxx.jpg
+# └── imagesIR/                 # 只需和 images 同级、同层次、同文件名
+#     ├── train/xxx.jpg
+#     ├── val/xxx.jpg
+#     └── test/xxx.jpg
