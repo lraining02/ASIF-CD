@@ -1,6 +1,5 @@
 # Parameters
 #通道数
-#关掉蒸馏就是只有交互和融合
 ch: 6
 nc: 3 # number of classes
 scales: # model compound scaling constants, i.e. 'model=yolo11n.yaml' will call yolo11.yaml with scale 'n'
