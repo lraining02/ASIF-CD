@@ -59,7 +59,6 @@ __all__ = (
     "ModalConcat",
     "FeatureAdd",
     "DDConv",
-    "ChannelToBatchConcat"
 )
 
 
@@ -1468,47 +1467,6 @@ class FeatureAdd(nn.Module):
         for i in range(1, len(x)):
             result = result + x[i]
         return result
-
-
-class ChannelToBatchConcat(nn.Module):
-    def __init__(self, in_ch=6, modal_ch=3, order="sar_opt", src_layout="opt_sar"):
-        super().__init__()
-        # 基础校验保持不变
-        self.in_ch = in_ch
-        self.modal_ch = modal_ch
-        self.order = order
-        self.src_layout = src_layout
-
-    def forward(self, x):
-        # 1. 兼容性处理：处理 YOLO 可能传来的 list
-        if isinstance(x, (list, tuple)):
-            x = x[0]
-
-        # 2. 获取当前通道
-        curr_ch = x.shape[1]
-
-        # --- 核心容错：兼容 Stride Check (3通道模拟数据) ---
-        if curr_ch == self.modal_ch:
-            # 如果已经是 3 通道，说明不需要拆分，直接原样返回
-            return x
-
-        # --- 正常的 6 -> 3 变换逻辑 ---
-        if curr_ch == self.in_ch:
-            # 拆分通道
-            if self.src_layout == "opt_sar":
-                x_opt, x_sar = x[:, :self.modal_ch], x[:, self.modal_ch:]
-            else:
-                x_sar, x_opt = x[:, :self.modal_ch], x[:, self.modal_ch:]
-
-            # 堆叠到 Batch 维度 [B, 6] -> [2B, 3]
-            if self.order == "sar_opt":
-                y = torch.cat([x_sar, x_opt], dim=0)
-            else:
-                y = torch.cat([x_opt, x_sar], dim=0)
-            return y
-
-        # 3. 最终防御：如果不匹配 3 也不匹配 6，再报错
-        raise ValueError(f"ChannelToBatchConcat: expected {self.in_ch} or {self.modal_ch}, got {curr_ch}")
 
 class DDConv(nn.Module):
     def __init__(self, c1, c2, k=3, s=1, p=1, g=1, act=True):
