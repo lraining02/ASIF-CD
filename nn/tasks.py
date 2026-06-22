@@ -70,18 +70,11 @@ from ultralytics.nn.modules import (
     v10Detect,
     A2C2f,
     ModalConcat, # 模态拼接
-    ChannelToBatchConcat
 )
 # 引入了融合模块 可以加入自己设计的
-from ultralytics.nn.modules.layers.CGAFusion import CGAFusion
-from ultralytics.nn.modules.layers.BiFocus import C2f_BiFocus
-from ultralytics.nn.modules.layers.DEA import DEA
+
 from ultralytics.nn.modules.layers.FUSION import Fusion_Module
 from ultralytics.nn.modules.layers.TwoFreDS import TwoFreDS
-from ultralytics.nn.modules.layers.CMAFF import CMAFF
-from ultralytics.nn.modules.layers.C2DFF import CDFIM, CGSA
-from ultralytics.nn.modules.layers.DKDNet import BDFusion
-from ultralytics.nn.modules.layers.MAIENet import BSCC, MAIE, MF
 from ultralytics.nn.modules.head import MultiDetect, MultiOBBDetect, DetectV5, DetectV5OBB
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -383,8 +376,6 @@ class DetectionModel(BaseModel):
                 # 处理 MultiDetect / dict 输出
                 if isinstance(output, dict):
                     output = output.get("fus", output)
-
-                # ⭐ 关键：递归解包，直到拿到 [Tensor, Tensor, Tensor]
                 def unwrap(o):
                     # 已经是标准格式：[P3, P4, P5]
                     if isinstance(o, list) and len(o) > 0 and isinstance(o[0], torch.Tensor):
@@ -1240,39 +1231,6 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c1 = [ch[x] for x in f]
             args = [args[0], 1, c1]
             c2 = None
-        # 复现论文CMAFF
-        elif m is CMAFF:
-            c1 = [ch[x] for x in f]
-            c2 = make_divisible(args[0] * width, 8)
-            args = [c2]
-        # 复现论文C2DFF
-        elif m is CDFIM:
-            c1 = [ch[x]for x in f]  # 两个输入的通道数列表
-            c2 = args[0]  # 取 YAML 里的第一个参数作为输出通道
-            c2 = make_divisible(min(c2, max_channels) * width, 8)
-            args = [c1, c2, *args[1:]]
-        elif m is CGSA:
-            c1 = [ch[x] for x in f]  # 两个输入的通道数列表
-            c2 = args[0]  # 取 YAML 里的第一个参数作为输出通道
-            c2 = make_divisible(min(c2, max_channels) * width, 8)
-            args = [c1, c2, *args[1:]]
-        # 复现论文DKD，没复现出来
-        elif m is BDFusion:
-            c1 = [ch[x]for x in f]
-            c2 = c1[0]  # 假设融合后通道数不变，取其中一个分支的通道
-            args = [c2]
-        # 复现论文MAIENet
-        elif m is ChannelToBatchConcat:
-            c1 = ch[f]
-            c2 = args[1]  # modal_ch
-            args = [c1, c2, args[2], args[3]]  # 确保传给 __init__ 的参数正确
-
-        elif m in {BSCC, MF, MAIE}:
-            c1 = ch[f]
-            c2 = make_divisible(min(args[0], max_channels) * width, 8)
-            args = [c1, c2]
-
-
 
         m_ = nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)  # module
         t = str(m)[8:-2].replace("__main__.", "")  # module type
