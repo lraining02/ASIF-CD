@@ -92,7 +92,7 @@ class DFLoss(nn.Module):
             + F.cross_entropy(pred_dist, tr.view(-1), reduction="none").view(tl.shape) * wr
         ).mean(-1, keepdim=True)
 
-# 回归损失。它同时计算 IoU Loss 和 DFL Loss，并把它们加权组合
+# 回归损失 它同时计算 IoU Loss 和 DFL Loss，并把它们加权组合
 class BboxLoss(nn.Module):
     """Criterion class for computing training losses during training."""
 
@@ -230,10 +230,6 @@ class v8DetectionLoss:
         loss = torch.zeros(3, device=self.device)  # box, cls, dfl
         feats = preds[1] if isinstance(preds, tuple) else preds
         # feats 里的每个特征图形状是 [B, C, H, W]
-        # 下面这行做了三件事：
-        #   a. view: 把形状变成 [B, no, -1]，即拉平 H, W
-        #   b. cat: 把 P3, P4, P5 所有尺度的预测拼在一起，变成一个超长的序列
-        #   c. split: 把通道切开。前 64 个是回归分布 (pred_distri)，后 80 个是分类分数 (pred_scores)
         pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
             (self.reg_max * 4, self.nc), 1
         )
@@ -261,11 +257,6 @@ class v8DetectionLoss:
         # dfl_conf = pred_distri.view(batch_size, -1, 4, self.reg_max).detach().softmax(-1)
         # dfl_conf = (dfl_conf.amax(-1).mean(-1) + dfl_conf.amax(-1).amin(-1)) / 2
 
-        # 输入：预测分数、预测框、GT框
-        # 输出：
-        #   target_bboxes: 每个网格应该回归的目标框
-        #   target_scores: 每个网格的目标分类分数 (做了标签平滑)
-        #   fg_mask: 前景掩码 (哪些网格是正样本)
         _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
             # pred_scores.detach().sigmoid() * 0.8 + dfl_conf.unsqueeze(-1) * 0.2,
             pred_scores.detach().sigmoid(),
@@ -363,13 +354,13 @@ class MultiLoss(v8DetectionLoss):
                     dist_opt, score_opt = self.slice_preds(preds["opt"])
                     dist_sar, score_sar = self.slice_preds(preds["sar"])
 
-                    # =============超参==========================
+                    # 超参 
                     teacher_threshold = 0.9  # 教师置信度阈值 tau
                     T = 2.0
                     distill_weight = 0.05  # lambda
 
                     with torch.no_grad():
-                        # 计算老师是谁 (基于表现比拼)
+                        # 基于表现比拼
                         qual_fus = (score_fus.sigmoid() * target_scores).sum(-1)
                         qual_opt = (score_opt.sigmoid() * target_scores).sum(-1)
                         qual_sar = (score_sar.sigmoid() * target_scores).sum(-1)
@@ -527,95 +518,6 @@ class MultiLoss(v8DetectionLoss):
         return pred_distri.permute(0, 2, 1).contiguous(), \
                pred_scores.permute(0, 2, 1).contiguous()
 
-
-
-class DKDNetLoss(v8DetectionLoss):
-    """
-    贴近论文的 DKDNetLoss：
-    total = w1 * det + w2 * sar_distill + w3 * opt_distill
-
-    说明：
-    - det loss 仍然来自 YOLOv8 原始检测损失
-    - distill 使用同模态 teacher-student
-    - 默认蒸馏你当前网络中最接近论文 stage3(H/16) 的 P4 BDFusion(512)
-    """
-    def __init__(self, model, stage_dim=512, w_det=0.8, w_sar=0.1, w_opt=0.1):
-        super().__init__(model)
-        self.net = model.model if hasattr(model, "model") else model
-
-        self.w_det = w_det
-        self.w_sar = w_sar
-        self.w_opt = w_opt
-
-        self.mse = nn.MSELoss()
-
-        # bridging module Bst(.): conv + bn
-        self.bridge_opt = nn.Sequential(
-            nn.Conv2d(stage_dim, stage_dim, 1, bias=False),
-            nn.BatchNorm2d(stage_dim)
-        )
-        self.bridge_sar = nn.Sequential(
-            nn.Conv2d(stage_dim, stage_dim, 1, bias=False),
-            nn.BatchNorm2d(stage_dim)
-        )
-
-    def _get_middle_bdfusion(self):
-        """取 P4 那个 BDFusion，最像论文 stage3 / H16"""
-        mods = [m for m in self.net.modules() if m.__class__.__name__ == "BDFusion"]
-        if len(mods) >= 2:
-            return mods[1]   # [P5, P4, P3] 里取中间那个 P4
-        elif len(mods) == 1:
-            return mods[0]
-        return None
-
-    @staticmethod
-    def _match_feat(teacher, student):
-        """对齐 teacher / student 的空间尺寸"""
-        if teacher.shape[-2:] != student.shape[-2:]:
-            teacher = F.interpolate(
-                teacher, size=student.shape[-2:], mode="bilinear", align_corners=False
-            )
-        return teacher
-
-    def __call__(self, preds, batch):
-        det_loss, loss_items = super().__call__(preds, batch)
-
-        device = det_loss.device
-        loss_sar = torch.zeros(1, device=device)
-        loss_opt = torch.zeros(1, device=device)
-
-        bdf = self._get_middle_bdfusion()
-
-        # teacher feature 需要模型 forward 时提前存好
-        teacher_opt = getattr(self.net, "teacher_stage3_opt", None)
-        teacher_sar = getattr(self.net, "teacher_stage3_sar", None)
-
-        if (
-            bdf is not None
-            and getattr(bdf, "last_student_opt", None) is not None
-            and getattr(bdf, "last_student_sar", None) is not None
-            and teacher_opt is not None
-            and teacher_sar is not None
-        ):
-            student_opt = bdf.last_student_opt
-            student_sar = bdf.last_student_sar
-
-            teacher_opt = self._match_feat(teacher_opt.detach(), student_opt)
-            teacher_sar = self._match_feat(teacher_sar.detach(), student_sar)
-
-            loss_opt = self.mse(self.bridge_opt(student_opt), teacher_opt)
-            loss_sar = self.mse(self.bridge_sar(student_sar), teacher_sar)
-
-        total_loss = self.w_det * det_loss + self.w_sar * loss_sar + self.w_opt * loss_opt
-
-        # 方便 trainer 打印
-        extra_items = torch.cat([
-            loss_sar.detach().view(1),
-            loss_opt.detach().view(1)
-        ])
-        loss_items = torch.cat([loss_items, extra_items], dim=0)
-
-        return total_loss, loss_items
 
 class v8SegmentationLoss(v8DetectionLoss):
     """Criterion class for computing training losses."""
@@ -1023,7 +925,7 @@ class v8OBBLoss(v8DetectionLoss):
             mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
         except RuntimeError as e:
             raise TypeError(
-                "ERROR ❌ OBB dataset incorrectly formatted or not a OBB dataset.\n"
+                "ERROR OBB dataset incorrectly formatted or not a OBB dataset.\n"
                 "This error can occur when incorrectly training a 'OBB' model on a 'detect' dataset, "
                 "i.e. 'yolo train model=yolo11n-obb.pt data=dota8.yaml'.\nVerify your dataset is a "
                 "correctly formatted 'OBB' dataset using 'data=dota8.yaml' "
@@ -1161,7 +1063,7 @@ class MultiOBBLoss(v8OBBLoss):
                         dist_fus, score_fus, ang_fus = self.slice_preds(preds["fus"])
                         dist_opt, score_opt, ang_opt = self.slice_preds(preds["opt"])
                         dist_sar, score_sar, ang_sar = self.slice_preds(preds["sar"])
-                        # ============超参============
+                        # 超参
                         teacher_threshold = 0.3  # 教师置信度阈值
                         T = 2.0
                         distill_weight = 0.05
@@ -1429,256 +1331,3 @@ class E2EDetectLoss:
 
 def smooth_BCE(eps=0.1):
     return 1.0 - 0.5 * eps, 0.5 * eps
-
-class DetectLossV5:
-    def __init__(self, model, autobalance=False):
-        device = next(model.parameters()).device
-        h = getattr(model, 'hyp', {})
-        if h is None: h = {}
-        self.hyp = h
-
-        m = model.model[-1]
-        self.na = m.na
-        self.nc = m.nc
-        self.nl = m.nl
-        self.anchors = m.anchors.to(device)
-        self.device = device
-
-        # 标签平滑处理
-        self.cp, self.cn = smooth_BCE(h.get('label_smoothing', 0.0))
-        self.BCEcls = nn.BCEWithLogitsLoss(reduction='mean')
-        self.BCEobj = nn.BCEWithLogitsLoss(reduction='mean')
-
-        # 每一层的权重平衡 (P3, P4, P5)
-        self.balance = [4.0, 1.0, 0.4]
-        self.gr = 1.0
-
-    def build_targets(self, p, targets):
-        if targets.shape[1] != 6:
-            print("❌ targets shape wrong in build_targets:", targets.shape)
-            targets = targets[:, :6] if targets.shape[1] > 6 else torch.zeros((0, 6), device=targets.device)
-        # ⭐ 核心修复 1: 强制只取前 6 列 [batch_idx, cls, x, y, w, h]
-        # 即使上一轮残留了第 7 列 (anchor_idx)，这里也会被强行切掉，确保维度永远是 6
-        t_base = targets.detach().clone()[:, :6]
-
-        na, nt = self.na, t_base.shape[0]
-        tcls, tbox, indices, anch = [], [], [], []
-
-        gain = torch.ones(7, device=self.device)
-        ai = torch.arange(na, device=self.device).float().view(na, 1).repeat(1, nt)
-
-        # ⭐ 核心修复 2: 使用局部变量 t_temp，不再覆盖或修改传入的 targets
-        t_temp = torch.cat((t_base.repeat(na, 1, 1), ai[..., None]), 2)  # [na, nt, 7]
-
-        for i in range(self.nl):
-            anchors = self.anchors[i]
-            shape = p[i].shape
-            # [W, H, W, H]
-            gain[2:6] = torch.tensor([shape[3], shape[2], shape[3], shape[2]], device=self.device)
-
-            # 每一层都基于干净的 7 列模板进行缩放
-            t = t_temp * gain
-
-            if nt:
-                # Anchor 宽高比筛选
-                r = t[..., 4:6] / anchors[:, None]
-                j = torch.max(r, 1. / r).max(2)[0] < self.hyp.get('anchor_t', 4.0)
-                t = t[j]
-
-                if t.shape[0] == 0:
-                    indices.append((torch.zeros(0, device=self.device).long(),) * 4)
-                    tbox.append(torch.zeros(0, device=self.device))
-                    anch.append(torch.zeros(0, device=self.device))
-                    tcls.append(torch.zeros(0, device=self.device).long())
-                    continue
-
-                # 提取匹配成功的正样本信息
-                b, c = t[:, :2].long().T
-                gxy = t[:, 2:4]
-                gwh = t[:, 4:6]
-                a = t[:, 6].long()  # anchor index
-
-                gij = gxy.long()
-                gi, gj = gij.T
-
-                # 保存索引 (注意 clamp 防止越界)
-                indices.append((b, a, gj.clamp(0, shape[2] - 1), gi.clamp(0, shape[3] - 1)))
-
-                # ⭐ 记录相对坐标 (gxy - gij) 以对齐 IoU 计算
-                tbox.append(torch.cat((gxy - gij, gwh), 1))
-                anch.append(anchors[a])
-                tcls.append(c)
-            else:
-                indices.append((torch.zeros(0, device=self.device).long(),) * 4)
-                tbox.append(torch.zeros(0, device=self.device))
-                anch.append(torch.zeros(0, device=self.device))
-                tcls.append(torch.zeros(0, device=self.device).long())
-
-        return tcls, tbox, indices, anch
-
-    def __call__(self, p, targets):
-        device = self.device
-
-        # ================= ✅ 核心：鲁棒 targets 构造 =================
-        if isinstance(targets, dict):
-            # --- 安全取值 ---
-            t_cls = targets.get('cls', torch.zeros(0, device=device))
-            t_bboxes = targets.get('bboxes', torch.zeros((0, 4), device=device))
-            t_batch_idx = targets.get('batch_idx', torch.zeros(0, device=device))
-
-            # --- 强制维度正确 ---
-            t_cls = t_cls.view(-1, 1).to(device)  # ⭐ 关键修复
-            t_batch_idx = t_batch_idx.view(-1, 1).to(device)
-            t_bboxes = t_bboxes.view(-1, 4).to(device)
-
-            # --- 拼接 ---
-            if t_cls.shape[0] == 0:
-                # ⭐ 空标签，直接构造标准空 tensor
-                t_input = torch.zeros((0, 6), device=device)
-            else:
-                t_input = torch.cat((t_batch_idx, t_cls, t_bboxes), dim=1)
-
-        else:
-            # 已经是 tensor 的情况
-            t_input = targets.detach().clone().to(device)
-
-            # --- 自动修复异常维度 ---
-            if t_input.numel() == 0:
-                t_input = torch.zeros((0, 6), device=device)
-            elif t_input.shape[1] < 6:
-                # 补齐（极端情况）
-                pad = torch.zeros((t_input.shape[0], 6 - t_input.shape[1]), device=device)
-                t_input = torch.cat([t_input, pad], dim=1)
-            elif t_input.shape[1] > 6:
-                # 裁掉多余列（比如你之前的第7列）
-                t_input = t_input[:, :6]
-
-        # ================= ✅ Debug（可选） =================
-        if t_input.shape[1] != 6:
-            print("❌ STILL BAD TARGET:", t_input.shape)
-            exit()
-
-        # =================================================
-
-        lcls = torch.zeros(1, device=device)
-        lbox = torch.zeros(1, device=device)
-        lobj = torch.zeros(1, device=device)
-
-        # ⭐ 统一使用干净的 targets
-        tcls, tbox, indices, anchors = self.build_targets(p, t_input)
-        # # ======== 🚀 STRIDE 专项检查模块 (跑一个 Epoch 就可以删掉) ========
-        # if getattr(self, 'stride_checked', False) is False:
-        #     print("\n" + "=" * 50)
-        #     print(f"DEBUG: Input Image Size = 512 (Assume)")
-        #     for i, pi in enumerate(p):
-        #         # pi.shape: [batch, anchors, height, width, 5+nc]
-        #         h, w = pi.shape[2], pi.shape[3]
-        #         actual_stride = 512 / h  # 假设你输入是 512
-        #         print(f"Layer {i}: Feature Map Size = {h}x{w} | Calculated Stride = {actual_stride:.1f}")
-        #
-        #     # 检查 Anchor 是否已经缩放
-        #     for i, a in enumerate(self.anchors):
-        #         print(f"Layer {i} Anchors (Scaled?): {a}")
-        #     print("=" * 50 + "\n")
-        #     self.stride_checked = True  # 只打印一次，防止刷屏
-        # # =============================================================
-
-        # ================= 后面完全不用动 =================
-        for i, pi in enumerate(p):
-            b, a, gj, gi = indices[i]
-            tobj = torch.zeros_like(pi[..., 0], device=device, dtype=pi.dtype)
-
-            n = b.shape[0]
-            if n:
-                ps = pi[b, a, gj, gi]
-
-                pxy = ps[:, :2].sigmoid() * 2. - 0.5
-                pwh = (ps[:, 2:4].sigmoid() * 2) ** 2 * anchors[i]
-                pbox = torch.cat((pxy, pwh), 1)
-
-                iou = bbox_iou(pbox, tbox[i], CIoU=True).squeeze()
-
-                if not torch.isnan(iou).any():
-                    lbox += (1.0 - iou).mean()
-
-                iou_detached = iou.detach().clamp(0).to(pi.dtype)
-                tobj[b, a, gj, gi] = iou_detached
-
-                if self.nc > 1:
-                    t = torch.full_like(ps[:, 5:], self.cn, device=device)
-                    t[range(n), tcls[i]] = self.cp
-                    lcls += self.BCEcls(ps[:, 5:], t)
-
-            obji = self.BCEobj(pi[..., 4], tobj)
-            lobj += obji * self.balance[i]
-
-        s_box = self.hyp.get('box', 0.05)
-        s_obj = self.hyp.get('obj', 1.0)
-        s_cls = self.hyp.get('cls', 0.5)
-
-        loss = lbox * s_box + lobj * s_obj + lcls * s_cls
-
-        return loss, torch.cat((lbox * s_box, lcls * s_cls, lobj * s_obj)).detach()
-
-
-class DetectLossV5OBB(DetectLossV5):
-    """YOLOv5 耦合旋转框损失函数 (基于继承实现)"""
-
-    def __init__(self, model):
-        super().__init__(model)
-        # 这里的 hyp 需要包含角度损失的权重，例如 hyp['angle'] = 0.5
-        self.hyp = model.hyp
-
-    def __call__(self, p, targets):
-        """
-        p: 预测值列表 [P3, P4, P5], 每个元素 shape 为 [bs, na, ny, nx, nc+6]
-        targets: 标签 [img_idx, cls, cx, cy, w, h, angle] (归一化)
-        """
-        device = targets.device
-        lcls, lbox, lobj, langle = (torch.zeros(1, device=device) for _ in range(4))
-
-        #  核心逻辑：获取正样本匹配结果 (复用父类的 build_targets)
-        # 注意：确保你的 build_targets 能处理带 angle 的 7 位 target
-        tcls, tbox, indices, anchors = self.build_targets(p, targets)
-
-        #  遍历每个探测层 (P3-P5)
-        for i, pi in enumerate(p):
-            b, a, gj, gi = indices[i]
-            tobj = torch.zeros_like(pi[..., 5], device=device)  # target obj
-            n = b.shape[0]  # 正样本数量
-            if n:
-                # 提取正样本点的预测值
-                ps = pi[b, a, gj, gi]
-
-                # 解码预测框 (xy, wh)
-                pxy = ps[:, 0:2].sigmoid() * 2. - 0.5
-                pwh = (ps[:, 2:4].sigmoid() * 2) ** 2 * anchors[i]
-                #  解码预测角度 (theta)
-                pangle = (ps[:, 4].sigmoid() - 0.25) * math.pi
-                # 组合成旋转框预测 [cx, cy, w, h, angle]
-                pbox = torch.cat((pxy, pwh, pangle.unsqueeze(-1)), 1)
-                # 计算旋转 IoU 损失 ---
-                # 注意：这里必须使用支持 OBB 的计算函数
-                iou = bbox_iou(pbox, tbox[i], xywh=True, CIoU=True, rot=True).squeeze()
-                lbox += (1.0 - iou).mean()
-                # 计算角度回归损失 (辅助监督) ---
-                tangle = tbox[i][:, 4]
-                langle += F.smooth_l1_loss(pangle, tangle)
-                # 物体存在损失 (Objectness Score)
-                tobj[b, a, gj, gi] = iou.detach().clamp(0).type(tobj.dtype)
-
-                # 分类损失 (BCE)
-                if self.nc > 1:
-                    t = torch.full_like(ps[:, 6:], self.cn, device=device)
-                    t[range(n), tcls[i]] = self.cp
-                    lcls += F.binary_cross_entropy_with_logits(ps[:, 6:], t)
-            # 汇总 Objectness 损失 (对应 pi[..., 5])
-            lobj += F.binary_cross_entropy_with_logits(pi[..., 5], tobj)
-
-        #  最终损失加权 (参考 CMAFF 论文权重平衡)
-        lbox *= self.hyp.get('box', 0.05)
-        lobj *= self.hyp.get('obj', 1.0)
-        lcls *= self.hyp.get('cls', 0.5)
-        langle *= self.hyp.get('angle', 0.05)
-        loss = (lbox + lobj + lcls + langle) * b.shape[0]
-        return loss, torch.cat((lbox, lobj, lcls, langle)).detach()
