@@ -2,8 +2,8 @@
 #通道数
 ch: 6
 nc: 3 # number of classes
-scales: # model compound scaling constants, i.e. 'model=yolo11n.yaml' will call yolo11.yaml with scale 'n'
-  # [depth, width, max_channels]
+scales: # model compound scaling constants, 
+# [depth, width, max_channels]
 #  n: [0.50, 0.25, 1024]
 #  s: [0.50, 0.50, 1024]
   m: [0.50, 1.00, 512]
@@ -15,7 +15,7 @@ backbone:
 #  [ 输入来自哪一层, 模块重复次数, 模块名称, 模块参数 ]
   - [-1, 1, IdentityInput, []] # 0 层0: 占位符，接收 6 通道输入
   - [-1, 1, ModalitySelector, [1]] # 1 RGB 从层0取数据，切分出第1个模态 (RGB)
-  - [-2, 1, ModalitySelector, [2]] # 2 SAR  从层0 (即-2) 取数据，切分出第2个模态 (SARR)
+  - [-2, 1, ModalitySelector, [2]] # 2 SAR  从层0 (即-2) 取数据，切分出第2个模态 (SAR)
 
   # YOLO-Fuse backbone
   # Visible branch
