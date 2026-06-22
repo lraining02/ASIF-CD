@@ -7,5 +7,3 @@ Our code is based on the implementation of [YOLOv11](https://github.com/ultralyt
 ## 📊 Datasets
 The experiments in our paper are evaluated on two benchmark datasets: **OGSOD-1.0** and **M4SAR**. Both of them are publicly available datasets, and researchers can download them directly from their official sources for replication and academic use.
 
-## ✉️ Citation
-This paper has been published in *IEEE Journal of Selected Topics in Applied Earth Observations and Remote Sensing*, 2026. If you find our paper or code useful for your research, please cite us:
